@@ -1,10 +1,57 @@
 package api
 
 import (
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/debpalash/OpenGTM/apps/backend-go/internal/wbcrud"
 )
+
+func TestIngestUpdateScopeRejectsIdentityAndDuplicateFields(t *testing.T) {
+	for _, body := range []string{
+		`{"update_fields":["website"]}`,
+		`{"update_fields":["Intel Score","intel score"]}`,
+		`{"update_fields":["Intel Score","row_id"]}`,
+		`{"update_fields":["Intel Score"],"surprise":true}`,
+	} {
+		r := httptest.NewRequest("POST", "/ingest-token", strings.NewReader(body))
+		if _, err := parseIngestUpdateScope(r); err == nil {
+			t.Errorf("accepted unsafe token scope %s", body)
+		}
+	}
+	r := httptest.NewRequest("POST", "/ingest-token", strings.NewReader(`{"update_fields":["Intel Score","Intent Topics"]}`))
+	fields, err := parseIngestUpdateScope(r)
+	if err != nil || len(fields) != 2 || fields[0] != "Intel Score" {
+		t.Fatalf("safe scope rejected: %v %v", fields, err)
+	}
+}
+
+func TestIngestUpdatePatchKeepsOnlyGrantedFields(t *testing.T) {
+	row := wbcrud.NewObj()
+	row.Set("website", "https://acme.io")
+	row.Set("Intel Score", 61)
+	patch, err := ingestUpdatePatch(row, []string{"Intel Score"})
+	if err != nil || patch.Len() != 1 {
+		t.Fatalf("patch rejected: %v %v", patch, err)
+	}
+	if _, found := patch.Get("website"); found {
+		t.Error("identity field entered update patch")
+	}
+	row.Set("ICP Band", nil)
+	patch, err = ingestUpdatePatch(row, []string{"Intel Score", "ICP Band"})
+	if err != nil {
+		t.Fatalf("scoped null did not clear an obsolete field: %v", err)
+	}
+	if value, found := patch.Get("ICP Band"); !found || value != nil {
+		t.Error("scoped null was not retained in update patch")
+	}
+	row.Set("Owner Notes", "Erase")
+	if _, err := ingestUpdatePatch(row, []string{"Intel Score"}); err == nil {
+		t.Error("out-of-scope field entered update patch")
+	}
+}
 
 // TestIngestTokenCompareConstantTime pins the comparison primitive: equal-length hex digests go through
 // crypto/subtle, a length mismatch is a plain false, and the route file never compares hashes with == / !=.
